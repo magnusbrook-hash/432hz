@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       # Pas de setup-python : self-hosted macOS → /Users/runner interdit. PEP 668 (Homebrew) : pas de pip global.
-      - name: Python venv + requests
+      - name: Python venv + deps
         run: |
           set -e
           which python3
@@ -28,6 +28,8 @@ jobs:
           python3 -m venv "$VENV"
           "$VENV/bin/python" -m pip install --upgrade pip
           "$VENV/bin/pip" install requests
+          # Empreinte TLS type Chrome — DataDome bloque souvent requests (Python) sur POST /tracks même en IP maison.
+          "$VENV/bin/pip" install 'curl_cffi>=0.6' || echo "::warning:: curl_cffi non installé — repli requests + warmup uniquement"
 
       - name: Install sshpass
         run: |
@@ -49,9 +51,11 @@ jobs:
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_PASS: ${{ secrets.SERVER_PASS }}
           SC_RESIDENTIAL_PROXY: ${{ secrets.SC_RESIDENTIAL_PROXY }}
+          # Optionnel : en-tête Cookie copié depuis le navigateur (connecté soundcloud.com), si DataDome bloque encore.
+          SC_COOKIES: ${{ secrets.SC_COOKIES }}
         run: |
           "${GITHUB_WORKSPACE}/.venv_soundcloud/bin/python" - << 'PYEOF'
-          import os, sys, requests, subprocess, time
+          import os, sys, subprocess, time
           from pathlib import Path
           from urllib.parse import urlparse
 
@@ -73,14 +77,34 @@ jobs:
               print(f"🌐 Proxy optionnel → {p.scheme}://{p.hostname}:{p.port or '80'}")
               return {"http": url, "https": url}
 
+          def open_session():
+              try:
+                  from curl_cffi import requests as creq
+              except ImportError as e:
+                  import requests as rq
+                  print(f"🔌 HTTP: requests — curl_cffi absent ({e})")
+                  return rq.Session()
+              last_err = None
+              for impersonate in ("chrome131", "chrome124", "chrome120", "chrome110"):
+                  try:
+                      s = creq.Session(impersonate=impersonate)
+                      print(f"🔌 HTTP: curl_cffi ({impersonate})")
+                      return s
+                  except Exception as ex:
+                      last_err = ex
+              import requests as rq
+              print(f"🔌 HTTP: requests — curl_cffi Session impossible ({last_err})")
+              return rq.Session()
+
           raw = need("SC_TOKEN", "SC_OAUTH_TOKEN")
           CID = need("SC_CLIENT_ID", "SC_CLIENT_ID")
           HOST = need("SERVER_HOST", "SERVER_HOST")
           USER = need("SERVER_USER", "SERVER_USER")
           PASSWD = need("SERVER_PASS", "SERVER_PASS")
           PROXIES = get_proxies()
+          COOKIES_EXTRA = os.environ.get("SC_COOKIES", "").strip()
 
-          print("🏠 Runner self-hosted — trafic SoundCloud vu comme connexion résidentielle classique")
+          print("🏠 Runner self-hosted — IP résidentielle ; POST /tracks reste protégé par DataDome")
 
           TOKEN = raw if raw.lower().startswith("oauth ") else f"OAuth {raw}"
           QUEUE = '/home/ubuntu/soundcloud_queue'
@@ -88,6 +112,11 @@ jobs:
           API   = 'https://api-v2.soundcloud.com'
           TMP   = Path('/tmp/sc_queue')
           TMP.mkdir(exist_ok=True)
+
+          UA = (
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          )
 
           def ssh(cmd):
               r = subprocess.run(
@@ -107,17 +136,54 @@ jobs:
                   print(f"   [scp stderr] {r.stderr.strip()[:500]}")
               return r.returncode == 0
 
-          headers = {
-              'Authorization': TOKEN,
-              'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-              'Accept': 'application/json',
-              'Origin': 'https://soundcloud.com',
-              'Referer': 'https://soundcloud.com/upload',
-          }
+          session = open_session()
+
+          def nav_headers():
+              h = {
+                  'User-Agent': UA,
+                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                  'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                  'Sec-Fetch-Dest': 'document',
+                  'Sec-Fetch-Mode': 'navigate',
+                  'Sec-Fetch-Site': 'none',
+                  'Upgrade-Insecure-Requests': '1',
+              }
+              if COOKIES_EXTRA:
+                  h['Cookie'] = COOKIES_EXTRA
+              return h
+
+          def api_headers():
+              h = {
+                  'Authorization': TOKEN,
+                  'User-Agent': UA,
+                  'Accept': 'application/json',
+                  'Origin': 'https://soundcloud.com',
+                  'Referer': 'https://soundcloud.com/upload',
+                  'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                  'Sec-Fetch-Dest': 'empty',
+                  'Sec-Fetch-Mode': 'cors',
+                  'Sec-Fetch-Site': 'same-site',
+                  'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                  'sec-ch-ua-mobile': '?0',
+                  'sec-ch-ua-platform': '"macOS"',
+              }
+              if COOKIES_EXTRA:
+                  h['Cookie'] = COOKIES_EXTRA
+              return h
+
+          for url in ('https://soundcloud.com/', 'https://soundcloud.com/upload'):
+              try:
+                  session.get(url, headers=nav_headers(), timeout=45, proxies=PROXIES)
+              except Exception as ex:
+                  print(f'   warmup {url}: {ex}')
+          if COOKIES_EXTRA:
+              print('🍪 SC_COOKIES défini (secret)')
 
           try:
-              r = requests.get(f'{API}/me', params={'client_id': CID}, headers=headers, timeout=45, proxies=PROXIES)
-          except requests.RequestException as e:
+              r = session.get(
+                  f'{API}/me', params={'client_id': CID},
+                  headers=api_headers(), timeout=45, proxies=PROXIES)
+          except Exception as e:
               print(f"❌ Réseau SoundCloud: {e}")
               sys.exit(1)
           print(f'/me → {r.status_code}')
@@ -150,10 +216,10 @@ jobs:
                   continue
               print(f'Upload: {title}')
               with open(local_file, 'rb') as f:
-                  resp = requests.post(
+                  resp = session.post(
                       f'{API}/tracks',
                       params={'client_id': CID},
-                      headers=headers,
+                      headers=api_headers(),
                       files={'track[asset_data]': (filename, f, 'audio/mpeg')},
                       data={
                           'track[title]': title,
@@ -172,7 +238,8 @@ jobs:
                   count += 1
                   time.sleep(5)
               elif resp.status_code == 403:
-                  print('❌ 403 DataDome — rare sur IP maison ; réessaie ou mets SC_RESIDENTIAL_PROXY.')
+                  print('❌ 403 DataDome sur POST /tracks.')
+                  print('   → Essaie: secret SC_RESIDENTIAL_PROXY, ou SC_COOKIES (Cookie navigateur soundcloud.com), ou réessaie plus tard.')
                   blocked = True
                   break
               local_file.unlink(missing_ok=True)
