@@ -9,6 +9,9 @@ jobs:
   upload:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Évite l’avertissement Node 20 (actions checkout/setup-python) — cf. blog GitHub Actions
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout
@@ -27,8 +30,10 @@ jobs:
 
       - name: Download pending MP3s from server & upload to SoundCloud
         env:
-          SC_TOKEN: ${{ secrets.SC_OAUTH_TOKEN }}
-          SC_CLIENT_ID: ${{ secrets.SC_CLIENT_ID }}
+          # Accepte SC_OAUTH_TOKEN (recommandé) ou SC_TOKEN si le secret a été mal nommé
+          SC_TOKEN: ${{ secrets.SC_OAUTH_TOKEN || secrets.SC_TOKEN }}
+          # Client_id public SoundCloud web — secret optionnel (repli ci-dessous)
+          SC_CLIENT_ID: ${{ secrets.SC_CLIENT_ID || '5S6lc0DNynNbQjkTQNDNtDDmWqdo1v0R' }}
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_PASS: ${{ secrets.SERVER_PASS }}
@@ -37,19 +42,20 @@ jobs:
           import os, sys, requests, subprocess, time
           from pathlib import Path
 
-          def need(name):
-              v = os.environ.get(name, "").strip()
+          def need(env_name, secret_hint):
+              v = os.environ.get(env_name, "").strip()
               if not v:
-                  print(f"❌ Secret manquant ou vide: {name}")
-                  print("→ GitHub → Settings → Secrets and variables → Actions")
+                  print(f"❌ Variable vide: {env_name}")
+                  print(f"   → Ajoute le secret GitHub : {secret_hint}")
+                  print("   → Settings → Secrets and variables → Actions → New repository secret")
                   sys.exit(1)
               return v
 
-          raw = need("SC_TOKEN")
-          CID = need("SC_CLIENT_ID")
-          HOST = need("SERVER_HOST")
-          USER = need("SERVER_USER")
-          PASSWD = need("SERVER_PASS")
+          raw = need("SC_TOKEN", "SC_OAUTH_TOKEN ou SC_TOKEN")
+          CID = need("SC_CLIENT_ID", "SC_CLIENT_ID")
+          HOST = need("SERVER_HOST", "SERVER_HOST")
+          USER = need("SERVER_USER", "SERVER_USER")
+          PASSWD = need("SERVER_PASS", "SERVER_PASS")
 
           TOKEN = raw if raw.lower().startswith("oauth ") else f"OAuth {raw}"
           QUEUE    = '/home/ubuntu/soundcloud_queue'
