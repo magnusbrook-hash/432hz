@@ -98,6 +98,22 @@ def _attach_mp3_to_upload_page(page, mp3: Path) -> bool:
     return False
 
 
+def _datadome_challenge_visible(page) -> bool:
+    """True si un iframe / overlay de challenge est réellement visible (pas le mot « captcha » dans un script)."""
+    for sel in (
+        'iframe[src*="captcha-delivery"]',
+        'iframe[src*="geo.captcha"]',
+        'iframe[src*="dd.captcha"]',
+    ):
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0 and loc.first.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def login_only(profile: Path, channel: str | None) -> int:
     from playwright.sync_api import sync_playwright
 
@@ -191,18 +207,36 @@ def upload_track(mp3: Path, title: str | None, profile: Path, channel: str | Non
                 except Exception:
                     pass
 
-            # Attendre un indicateur de traitement / formulaire (SPA)
-            for _ in range(180):
+            # Attendre traitement (SPA) — ne pas scanner « captcha » dans tout le HTML (scripts DataDome = faux +)
+            dd_hits = 0
+            for tick in range(180):
                 time.sleep(1)
                 url = page.url
-                html = page.content()
-                if "captcha" in html.lower() or "captcha-delivery" in html:
-                    print("❌ Captcha / DataDome visible dans la page — résous-le manuellement une fois avec --headed.", file=sys.stderr)
-                    return 6
-                if "/you/tracks" in url or "/tracks/" in url or (mp3.stem[:12].lower() in html.lower() and "upload" not in url):
+                html_l = page.content().lower()
+
+                if "/you/tracks" in url or (
+                    "/tracks/" in url
+                    and mp3.stem[:12].lower() in html_l
+                    and "upload" not in url
+                ):
                     print(f"✅ Upload semble terminé — {url[:80]}")
                     break
-                if "error" in html.lower() and "upload" in html.lower():
+
+                # Début : laisser le temps au rendu avant de juger DataDome
+                if tick >= 12 and _datadome_challenge_visible(page):
+                    dd_hits += 1
+                    if dd_hits >= 4:
+                        print(
+                            "❌ Challenge DataDome / captcha *visible* — en headless c’est souvent bloquant.\n"
+                            "   → Variable dépôt SC_PLAYWRIGHT_HEADED=true (Mac avec session graphique), ou\n"
+                            "   → SC_PLAYWRIGHT_CHANNEL=chrome, ou refais --login-only pour rafraîchir les cookies.",
+                            file=sys.stderr,
+                        )
+                        return 6
+                else:
+                    dd_hits = 0
+
+                if tick > 20 and "upload failed" in html_l and "error" in html_l:
                     print("❌ Erreur affichée sur la page upload.", file=sys.stderr)
                     return 7
             else:
