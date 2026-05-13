@@ -1,0 +1,131 @@
+name: SoundCloud Auto Upload
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # Toutes les 6 heures
+  workflow_dispatch:          # Déclenchement manuel possible
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests sshpass 2>/dev/null || pip install requests paramiko
+
+      - name: Download pending MP3s from server & upload to SoundCloud
+        env:
+          SC_TOKEN: ${{ secrets.SC_OAUTH_TOKEN }}
+          SC_CLIENT_ID: ${{ secrets.SC_CLIENT_ID }}
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_PASS: ${{ secrets.SERVER_PASS }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, json, requests, subprocess, time
+          from pathlib import Path
+
+          TOKEN    = f"OAuth {os.environ['SC_TOKEN']}"
+          CID      = os.environ['SC_CLIENT_ID']
+          HOST     = os.environ['SERVER_HOST']
+          USER     = os.environ['SERVER_USER']
+          PASSWD   = os.environ['SERVER_PASS']
+          QUEUE    = '/home/ubuntu/soundcloud_queue'
+          DONE     = '/home/ubuntu/soundcloud_queue_done'
+          API      = 'https://api-v2.soundcloud.com'
+          TMP      = Path('/tmp/sc_queue')
+          TMP.mkdir(exist_ok=True)
+
+          def ssh(cmd):
+              r = subprocess.run(
+                  ['sshpass', '-p', PASSWD, 'ssh', '-o', 'StrictHostKeyChecking=no',
+                   f'{USER}@{HOST}', cmd],
+                  capture_output=True, text=True, timeout=30)
+              return r.returncode, r.stdout.strip()
+
+          def scp_get(remote, local):
+              r = subprocess.run(
+                  ['sshpass', '-p', PASSWD, 'scp', '-o', 'StrictHostKeyChecking=no',
+                   f'{USER}@{HOST}:{remote}', str(local)],
+                  capture_output=True, text=True, timeout=120)
+              return r.returncode == 0
+
+          headers = {
+              'Authorization': TOKEN,
+              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'Accept': 'application/json',
+              'Origin': 'https://soundcloud.com',
+              'Referer': 'https://soundcloud.com/',
+          }
+
+          # Vérifier le token
+          r = requests.get(f'{API}/me', params={'client_id': CID}, headers=headers, timeout=15)
+          print(f'/me → {r.status_code}')
+          if r.status_code != 200:
+              print('Token invalide, arrêt.')
+              exit(1)
+          print(f"Compte: {r.json().get('username')}")
+
+          # Lister les MP3 en queue sur le serveur
+          _, files_raw = ssh(f'ls {QUEUE}/*.mp3 2>/dev/null')
+          if not files_raw:
+              print('Aucun fichier en queue.')
+              exit(0)
+
+          remote_files = [f.strip() for f in files_raw.splitlines() if f.strip()]
+          print(f'{len(remote_files)} fichier(s) en queue')
+
+          count = 0
+          for remote_path in remote_files[:5]:  # Max 5 par run
+              filename = Path(remote_path).name
+              stem = Path(filename).stem
+              title = stem.replace('_432Hz','').replace('_432hz','').replace('_',' ').strip() + ' - 432Hz'
+
+              local_file = TMP / filename
+              print(f'\nTéléchargement: {filename}')
+              if not scp_get(remote_path, local_file):
+                  print(f'Erreur SCP')
+                  continue
+
+              print(f'Upload: {title}')
+              with open(local_file, 'rb') as f:
+                  resp = requests.post(
+                      f'{API}/tracks',
+                      params={'client_id': CID},
+                      headers=headers,
+                      files={'track[asset_data]': (filename, f, 'audio/mpeg')},
+                      data={
+                          'track[title]': title,
+                          'track[sharing]': 'public',
+                          'track[tag_list]': '"432hz" "healing frequency" "music"',
+                          'track[description]': 'Converti en 432Hz par https://432hz-converter.com/\n\n#432hz',
+                          'track[genre]': '432hz',
+                      },
+                      timeout=300,
+                  )
+
+              print(f'Status: {resp.status_code} | {resp.text[:200]}')
+
+              if resp.status_code in (200, 201):
+                  url = resp.json().get('permalink_url', '')
+                  print(f'✅ Publié: {url}')
+                  ssh(f'mkdir -p {DONE} && mv "{remote_path}" {DONE}/')
+                  count += 1
+                  time.sleep(5)
+              elif resp.status_code == 403:
+                  print('❌ DataDome bloque GitHub Actions IPs aussi — voir alternatives')
+                  break
+
+              local_file.unlink(missing_ok=True)
+
+          print(f'\n✅ {count} track(s) publiés')
+          PYEOF
