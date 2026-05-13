@@ -1,6 +1,16 @@
-# Upload SoundCloud depuis TON Mac (ou PC maison) — IP résidentielle, sans proxy payant.
-# Prérequis : installer un « self-hosted runner » GitHub sur la machine (voir message du repo ou doc GitHub).
-# Tant qu’aucun runner maison n’est en ligne, les jobs restent « en attente ».
+# Upload SoundCloud depuis TON Mac (self-hosted).
+#
+# DataDome ne juge pas que l’IP : TLS (JA3), enchaînement des requêtes, cookies de session,
+# timing, et surtout « gros POST multipart » API ≠ navigateur. Contournement fiable : mode
+# Playwright (défaut). Mode SC_UPLOAD_MODE=api = TLS curl_cffi + warm-up + jitter (best-effort).
+#
+# Mode par défaut : Playwright + profil navigateur = même session / cookies que Chrome.
+# Première fois sur le Mac du runner :
+#   python3 .github/scripts/soundcloud_playwright_upload.py --login-only
+#   (profil par défaut : ~/.432hz/soundcloud-playwright-profile)
+#
+# Mode API (sans navigateur) : variable dépôt SC_UPLOAD_MODE=api + secrets token
+# (souvent bloqué par DataDome sur POST /tracks).
 
 name: SoundCloud Upload (maison — self-hosted)
 
@@ -18,7 +28,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Pas de setup-python : self-hosted macOS → /Users/runner interdit. PEP 668 (Homebrew) : pas de pip global.
+      # Pas de setup-python : self-hosted macOS → /Users/runner interdit. PEP 668 : venv.
       - name: Python venv + deps
         run: |
           set -e
@@ -28,8 +38,9 @@ jobs:
           python3 -m venv "$VENV"
           "$VENV/bin/python" -m pip install --upgrade pip
           "$VENV/bin/pip" install requests
-          # Empreinte TLS type Chrome — DataDome bloque souvent requests (Python) sur POST /tracks même en IP maison.
-          "$VENV/bin/pip" install 'curl_cffi>=0.6' || echo "::warning:: curl_cffi non installé — repli requests + warmup uniquement"
+          "$VENV/bin/pip" install 'curl_cffi>=0.6' || true
+          "$VENV/bin/pip" install 'playwright>=1.40'
+          "$VENV/bin/python" -m playwright install chromium
 
       - name: Install sshpass
         run: |
@@ -45,17 +56,23 @@ jobs:
 
       - name: Télécharger la queue VPS et uploader sur SoundCloud
         env:
+          # Mode api uniquement :
           SC_TOKEN: ${{ secrets.SC_OAUTH_TOKEN || secrets.SC_TOKEN }}
           SC_CLIENT_ID: ${{ secrets.SC_CLIENT_ID || '5S6lc0DNynNbQjkTQNDNtDDmWqdo1v0R' }}
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_PASS: ${{ secrets.SERVER_PASS }}
           SC_RESIDENTIAL_PROXY: ${{ secrets.SC_RESIDENTIAL_PROXY }}
-          # Optionnel : en-tête Cookie copié depuis le navigateur (connecté soundcloud.com), si DataDome bloque encore.
           SC_COOKIES: ${{ secrets.SC_COOKIES }}
+          # browser (défaut) | api
+          SC_UPLOAD_MODE: ${{ vars.SC_UPLOAD_MODE }}
+          # Chemin profil Playwright sur le Mac runner (défaut dans le script si vide)
+          SC_PLAYWRIGHT_PROFILE: ${{ vars.SC_PLAYWRIGHT_PROFILE }}
+          SC_PLAYWRIGHT_HEADED: ${{ vars.SC_PLAYWRIGHT_HEADED }}
+          SC_PLAYWRIGHT_CHANNEL: ${{ vars.SC_PLAYWRIGHT_CHANNEL }}
         run: |
           "${GITHUB_WORKSPACE}/.venv_soundcloud/bin/python" - << 'PYEOF'
-          import os, sys, subprocess, time
+          import os, sys, subprocess, time, random
           from pathlib import Path
           from urllib.parse import urlparse
 
@@ -96,27 +113,25 @@ jobs:
               print(f"🔌 HTTP: requests — curl_cffi Session impossible ({last_err})")
               return rq.Session(), False
 
-          raw = need("SC_TOKEN", "SC_OAUTH_TOKEN")
-          CID = need("SC_CLIENT_ID", "SC_CLIENT_ID")
           HOST = need("SERVER_HOST", "SERVER_HOST")
           USER = need("SERVER_USER", "SERVER_USER")
           PASSWD = need("SERVER_PASS", "SERVER_PASS")
-          PROXIES = get_proxies()
-          COOKIES_EXTRA = os.environ.get("SC_COOKIES", "").strip()
 
-          print("🏠 Runner self-hosted — IP résidentielle ; POST /tracks reste protégé par DataDome")
+          _mode = (os.environ.get("SC_UPLOAD_MODE") or "browser").strip().lower()
+          USE_API = _mode in ("api", "http", "curl", "rest")
 
-          TOKEN = raw if raw.lower().startswith("oauth ") else f"OAuth {raw}"
           QUEUE = '/home/ubuntu/soundcloud_queue'
           DONE  = '/home/ubuntu/soundcloud_queue_done'
           API   = 'https://api-v2.soundcloud.com'
           TMP   = Path('/tmp/sc_queue')
           TMP.mkdir(exist_ok=True)
 
-          UA = (
-              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
-              '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-          )
+          PROJ = Path(os.environ.get("GITHUB_WORKSPACE", "."))
+          _prof = os.environ.get("SC_PLAYWRIGHT_PROFILE", "").strip()
+          PROFILE = Path(_prof) if _prof else (Path.home() / ".432hz" / "soundcloud-playwright-profile")
+          PW_SCRIPT = PROJ / ".github" / "scripts" / "soundcloud_playwright_upload.py"
+          PW_HEADED = os.environ.get("SC_PLAYWRIGHT_HEADED", "").strip().lower() in ("1", "true", "yes")
+          PW_CHANNEL = os.environ.get("SC_PLAYWRIGHT_CHANNEL", "").strip() or None
 
           def ssh(cmd):
               r = subprocess.run(
@@ -136,61 +151,96 @@ jobs:
                   print(f"   [scp stderr] {r.stderr.strip()[:500]}")
               return r.returncode == 0
 
-          session, use_cffi = open_session()
+          session = None
+          use_cffi = False
 
-          def nav_headers():
-              h = {
-                  'User-Agent': UA,
-                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                  'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-                  'Sec-Fetch-Dest': 'document',
-                  'Sec-Fetch-Mode': 'navigate',
-                  'Sec-Fetch-Site': 'none',
-                  'Upgrade-Insecure-Requests': '1',
-              }
-              if COOKIES_EXTRA:
-                  h['Cookie'] = COOKIES_EXTRA
-              return h
+          if USE_API:
+              raw = need("SC_TOKEN", "SC_OAUTH_TOKEN")
+              CID = need("SC_CLIENT_ID", "SC_CLIENT_ID")
+              PROXIES = get_proxies()
+              COOKIES_EXTRA = os.environ.get("SC_COOKIES", "").strip()
+              print("🏠 Mode API — DataDome peut bloquer POST /tracks")
+              TOKEN = raw if raw.lower().startswith("oauth ") else f"OAuth {raw}"
+              UA = (
+                  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+              )
+              session, use_cffi = open_session()
 
-          def api_headers():
-              h = {
-                  'Authorization': TOKEN,
-                  'User-Agent': UA,
-                  'Accept': 'application/json',
-                  'Origin': 'https://soundcloud.com',
-                  'Referer': 'https://soundcloud.com/upload',
-                  'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-                  'Sec-Fetch-Dest': 'empty',
-                  'Sec-Fetch-Mode': 'cors',
-                  'Sec-Fetch-Site': 'same-site',
-                  'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-                  'sec-ch-ua-mobile': '?0',
-                  'sec-ch-ua-platform': '"macOS"',
-              }
-              if COOKIES_EXTRA:
-                  h['Cookie'] = COOKIES_EXTRA
-              return h
+              def nav_headers():
+                  h = {
+                      'User-Agent': UA,
+                      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                      'Sec-Fetch-Dest': 'document',
+                      'Sec-Fetch-Mode': 'navigate',
+                      'Sec-Fetch-Site': 'none',
+                      'Upgrade-Insecure-Requests': '1',
+                  }
+                  if COOKIES_EXTRA:
+                      h['Cookie'] = COOKIES_EXTRA
+                  return h
 
-          for url in ('https://soundcloud.com/', 'https://soundcloud.com/upload'):
+              def api_headers():
+                  h = {
+                      'Authorization': TOKEN,
+                      'User-Agent': UA,
+                      'Accept': 'application/json',
+                      'Origin': 'https://soundcloud.com',
+                      'Referer': 'https://soundcloud.com/upload',
+                      'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+                      'Sec-Fetch-Dest': 'empty',
+                      'Sec-Fetch-Mode': 'cors',
+                      'Sec-Fetch-Site': 'same-site',
+                      'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                      'sec-ch-ua-mobile': '?0',
+                      'sec-ch-ua-platform': '"macOS"',
+                  }
+                  if COOKIES_EXTRA:
+                      h['Cookie'] = COOKIES_EXTRA
+                  return h
+
+              for url in (
+                  'https://soundcloud.com/',
+                  'https://soundcloud.com/discover',
+                  'https://soundcloud.com/upload',
+              ):
+                  try:
+                      session.get(url, headers=nav_headers(), timeout=45, proxies=PROXIES)
+                      time.sleep(random.uniform(0.8, 2.2))
+                  except Exception as ex:
+                      print(f'   warmup {url}: {ex}')
               try:
-                  session.get(url, headers=nav_headers(), timeout=45, proxies=PROXIES)
+                  session.get('https://soundcloud.com/you/tracks', headers=nav_headers(), timeout=45, proxies=PROXIES)
+                  time.sleep(random.uniform(1.0, 2.5))
               except Exception as ex:
-                  print(f'   warmup {url}: {ex}')
-          if COOKIES_EXTRA:
-              print('🍪 SC_COOKIES défini (secret)')
-
-          try:
-              r = session.get(
-                  f'{API}/me', params={'client_id': CID},
-                  headers=api_headers(), timeout=45, proxies=PROXIES)
-          except Exception as e:
-              print(f"❌ Réseau SoundCloud: {e}")
-              sys.exit(1)
-          print(f'/me → {r.status_code}')
-          if r.status_code != 200:
-              print(r.text[:300])
-              sys.exit(1)
-          print(f"Compte: {r.json().get('username')}")
+                  print(f'   warmup you/tracks: {ex}')
+              if COOKIES_EXTRA:
+                  print('🍪 SC_COOKIES défini (secret)')
+              try:
+                  r = session.get(
+                      f'{API}/me', params={'client_id': CID},
+                      headers=api_headers(), timeout=45, proxies=PROXIES)
+              except Exception as e:
+                  print(f"❌ Réseau SoundCloud: {e}")
+                  sys.exit(1)
+              print(f'/me → {r.status_code}')
+              if r.status_code != 200:
+                  print(r.text[:300])
+                  sys.exit(1)
+              print(f"Compte: {r.json().get('username')}")
+              time.sleep(random.uniform(1.5, 3.5))
+          else:
+              print("🏠 Mode Playwright (session navigateur sur ce Mac)")
+              if not PROFILE.is_dir():
+                  print(f"❌ Profil absent : {PROFILE}")
+                  print(f"   Une fois, en interactif sur ce Mac :")
+                  print(f"   {sys.executable} {PW_SCRIPT} --profile {PROFILE} --login-only")
+                  print("   Ou définis la variable dépôt SC_UPLOAD_MODE=api pour l’upload HTTP (token requis).")
+                  sys.exit(1)
+              if not PW_SCRIPT.is_file():
+                  print(f"❌ Script manquant : {PW_SCRIPT}")
+                  sys.exit(1)
 
           code, ping = ssh('echo OK')
           if code != 0 or ping != 'OK':
@@ -215,62 +265,84 @@ jobs:
               if not scp_get(remote_path, local_file):
                   continue
               print(f'Upload: {title}')
-              desc = 'Converti en 432Hz par https://432hz-converter.com/\n\n#432hz'
-              tags = '"432hz" "healing frequency" "music"'
-              if use_cffi:
-                  import curl_cffi
-                  mp = curl_cffi.CurlMime.from_list([
-                      {'name': 'track[title]', 'content_type': 'text/plain', 'data': title},
-                      {'name': 'track[sharing]', 'content_type': 'text/plain', 'data': 'public'},
-                      {'name': 'track[tag_list]', 'content_type': 'text/plain', 'data': tags},
-                      {'name': 'track[description]', 'content_type': 'text/plain', 'data': desc},
-                      {'name': 'track[genre]', 'content_type': 'text/plain', 'data': '432hz'},
-                      {
-                          'name': 'track[asset_data]',
-                          'content_type': 'audio/mpeg',
-                          'filename': filename,
-                          'local_path': str(local_file),
-                      },
-                  ])
-                  try:
-                      resp = session.post(
-                          f'{API}/tracks',
-                          params={'client_id': CID},
-                          headers=api_headers(),
-                          multipart=mp,
-                          timeout=300,
-                          proxies=PROXIES,
-                      )
-                  finally:
-                      mp.close()
-              else:
-                  with open(local_file, 'rb') as f:
-                      resp = session.post(
-                          f'{API}/tracks',
-                          params={'client_id': CID},
-                          headers=api_headers(),
-                          files={'track[asset_data]': (filename, f, 'audio/mpeg')},
-                          data={
-                              'track[title]': title,
-                              'track[sharing]': 'public',
-                              'track[tag_list]': tags,
-                              'track[description]': desc,
-                              'track[genre]': '432hz',
+              if USE_API:
+                  time.sleep(random.uniform(2.0, 5.0))
+                  desc = 'Converti en 432Hz par https://432hz-converter.com/\n\n#432hz'
+                  tags = '"432hz" "healing frequency" "music"'
+                  if use_cffi:
+                      import curl_cffi
+                      mp = curl_cffi.CurlMime.from_list([
+                          {'name': 'track[title]', 'content_type': 'text/plain', 'data': title},
+                          {'name': 'track[sharing]', 'content_type': 'text/plain', 'data': 'public'},
+                          {'name': 'track[tag_list]', 'content_type': 'text/plain', 'data': tags},
+                          {'name': 'track[description]', 'content_type': 'text/plain', 'data': desc},
+                          {'name': 'track[genre]', 'content_type': 'text/plain', 'data': '432hz'},
+                          {
+                              'name': 'track[asset_data]',
+                              'content_type': 'audio/mpeg',
+                              'filename': filename,
+                              'local_path': str(local_file),
                           },
-                          timeout=300,
-                          proxies=PROXIES,
-                      )
-              print(f'Status: {resp.status_code} | {resp.text[:200]}')
-              if resp.status_code in (200, 201):
-                  print(f'✅ Publié: {resp.json().get("permalink_url", "")}')
-                  ssh(f'mkdir -p {DONE} && mv "{remote_path}" {DONE}/')
-                  count += 1
-                  time.sleep(5)
-              elif resp.status_code == 403:
-                  print('❌ 403 DataDome sur POST /tracks.')
-                  print('   → Essaie: secret SC_RESIDENTIAL_PROXY, ou SC_COOKIES (Cookie navigateur soundcloud.com), ou réessaie plus tard.')
-                  blocked = True
-                  break
+                      ])
+                      try:
+                          resp = session.post(
+                              f'{API}/tracks',
+                              params={'client_id': CID},
+                              headers=api_headers(),
+                              multipart=mp,
+                              timeout=300,
+                              proxies=PROXIES,
+                          )
+                      finally:
+                          mp.close()
+                  else:
+                      with open(local_file, 'rb') as f:
+                          resp = session.post(
+                              f'{API}/tracks',
+                              params={'client_id': CID},
+                              headers=api_headers(),
+                              files={'track[asset_data]': (filename, f, 'audio/mpeg')},
+                              data={
+                                  'track[title]': title,
+                                  'track[sharing]': 'public',
+                                  'track[tag_list]': tags,
+                                  'track[description]': desc,
+                                  'track[genre]': '432hz',
+                              },
+                              timeout=300,
+                              proxies=PROXIES,
+                          )
+                  print(f'Status: {resp.status_code} | {resp.text[:200]}')
+                  if resp.status_code in (200, 201):
+                      print(f'✅ Publié: {resp.json().get("permalink_url", "")}')
+                      ssh(f'mkdir -p {DONE} && mv "{remote_path}" {DONE}/')
+                      count += 1
+                      time.sleep(5)
+                  elif resp.status_code == 403:
+                      print('❌ 403 DataDome — passe en mode Playwright (défaut) ou proxy / cookies.')
+                      blocked = True
+                      break
+              else:
+                  cmd = [
+                      sys.executable, str(PW_SCRIPT),
+                      '--profile', str(PROFILE),
+                      '--mp3', str(local_file),
+                      '--title', title,
+                  ]
+                  if PW_CHANNEL:
+                      cmd.extend(['--channel', PW_CHANNEL])
+                  if PW_HEADED:
+                      cmd.append('--headed')
+                  pr = subprocess.run(cmd, timeout=900)
+                  if pr.returncode == 0:
+                      print('✅ Upload navigateur OK')
+                      ssh(f'mkdir -p {DONE} && mv "{remote_path}" {DONE}/')
+                      count += 1
+                      time.sleep(5)
+                  else:
+                      print(f'❌ Playwright exit {pr.returncode}')
+                      blocked = True
+                      break
               local_file.unlink(missing_ok=True)
           print(f'\n✅ {count} track(s) publiés')
           if blocked:
