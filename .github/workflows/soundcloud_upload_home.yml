@@ -1,17 +1,18 @@
-name: SoundCloud Auto Upload
+# Upload SoundCloud depuis TON Mac (ou PC maison) — IP résidentielle, sans proxy payant.
+# Prérequis : installer un « self-hosted runner » GitHub sur la machine (voir message du repo ou doc GitHub).
+# Tant qu’aucun runner maison n’est en ligne, les jobs restent « en attente ».
+
+name: SoundCloud Upload (maison — self-hosted)
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'   # Toutes les 6 heures
-  workflow_dispatch:          # Déclenchement manuel possible
+    - cron: '15 */6 * * *'   # Décalé de 15 min vs le workflow cloud pour éviter double tir
 
 jobs:
   upload:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # Évite l’avertissement Node 20 (actions checkout/setup-python) — cf. blog GitHub Actions
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    runs-on: self-hosted
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -22,23 +23,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install sshpass + requests
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq sshpass
           pip install requests
+          if command -v sshpass >/dev/null 2>&1; then
+            echo "sshpass déjà présent"
+          elif [ "${RUNNER_OS:-}" = "macOS" ]; then
+            brew install sshpass || brew install esolitos/ipa/sshpass/sshpass
+          elif [ "${RUNNER_OS:-}" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
+          else
+            echo "::warning:: Installe sshpass manuellement sur ce runner"
+          fi
 
-      - name: Download pending MP3s from server & upload to SoundCloud
+      - name: Télécharger la queue VPS et uploader sur SoundCloud
         env:
-          # Accepte SC_OAUTH_TOKEN (recommandé) ou SC_TOKEN si le secret a été mal nommé
           SC_TOKEN: ${{ secrets.SC_OAUTH_TOKEN || secrets.SC_TOKEN }}
-          # Client_id public SoundCloud web — secret optionnel (repli ci-dessous)
           SC_CLIENT_ID: ${{ secrets.SC_CLIENT_ID || '5S6lc0DNynNbQjkTQNDNtDDmWqdo1v0R' }}
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_PASS: ${{ secrets.SERVER_PASS }}
-          # Proxy résidentiel HTTPS (contourne DataDome). Ex: http://user:pass@gw.residential.example:port
-          # Secret optionnel : SC_RESIDENTIAL_PROXY
           SC_RESIDENTIAL_PROXY: ${{ secrets.SC_RESIDENTIAL_PROXY }}
         run: |
           python3 - << 'PYEOF'
@@ -50,8 +54,7 @@ jobs:
               v = os.environ.get(env_name, "").strip()
               if not v:
                   print(f"❌ Variable vide: {env_name}")
-                  print(f"   → Ajoute le secret GitHub : {secret_hint}")
-                  print("   → Settings → Secrets and variables → Actions → New repository secret")
+                  print(f"   → Secret GitHub : {secret_hint}")
                   sys.exit(1)
               return v
 
@@ -62,31 +65,30 @@ jobs:
               if not url.startswith(("http://", "https://")):
                   url = "http://" + url
               p = urlparse(url)
-              host = p.hostname or "?"
-              port = p.port or (443 if p.scheme == "https" else 80)
-              print(f"🌐 Proxy résidentiel actif → {p.scheme}://{host}:{port} (trafic SoundCloud uniquement)")
+              print(f"🌐 Proxy optionnel → {p.scheme}://{p.hostname}:{p.port or '80'}")
               return {"http": url, "https": url}
 
-          raw = need("SC_TOKEN", "SC_OAUTH_TOKEN ou SC_TOKEN")
+          raw = need("SC_TOKEN", "SC_OAUTH_TOKEN")
           CID = need("SC_CLIENT_ID", "SC_CLIENT_ID")
           HOST = need("SERVER_HOST", "SERVER_HOST")
           USER = need("SERVER_USER", "SERVER_USER")
           PASSWD = need("SERVER_PASS", "SERVER_PASS")
-
           PROXIES = get_proxies()
 
+          print("🏠 Runner self-hosted — trafic SoundCloud vu comme connexion résidentielle classique")
+
           TOKEN = raw if raw.lower().startswith("oauth ") else f"OAuth {raw}"
-          QUEUE    = '/home/ubuntu/soundcloud_queue'
-          DONE     = '/home/ubuntu/soundcloud_queue_done'
-          API      = 'https://api-v2.soundcloud.com'
-          TMP      = Path('/tmp/sc_queue')
+          QUEUE = '/home/ubuntu/soundcloud_queue'
+          DONE  = '/home/ubuntu/soundcloud_queue_done'
+          API   = 'https://api-v2.soundcloud.com'
+          TMP   = Path('/tmp/sc_queue')
           TMP.mkdir(exist_ok=True)
 
           def ssh(cmd):
               r = subprocess.run(
                   ['sshpass', '-p', PASSWD, 'ssh', '-o', 'StrictHostKeyChecking=no',
                    f'{USER}@{HOST}', cmd],
-                  capture_output=True, text=True, timeout=30)
+                  capture_output=True, text=True, timeout=60)
               if r.returncode != 0 and r.stderr.strip():
                   print(f"   [ssh stderr] {r.stderr.strip()[:500]}")
               return r.returncode, r.stdout.strip()
@@ -95,64 +97,52 @@ jobs:
               r = subprocess.run(
                   ['sshpass', '-p', PASSWD, 'scp', '-o', 'StrictHostKeyChecking=no',
                    f'{USER}@{HOST}:{remote}', str(local)],
-                  capture_output=True, text=True, timeout=120)
+                  capture_output=True, text=True, timeout=300)
               if r.returncode != 0:
                   print(f"   [scp stderr] {r.stderr.strip()[:500]}")
               return r.returncode == 0
 
           headers = {
               'Authorization': TOKEN,
-              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
               'Accept': 'application/json',
               'Origin': 'https://soundcloud.com',
-              'Referer': 'https://soundcloud.com/',
+              'Referer': 'https://soundcloud.com/upload',
           }
 
-          # Vérifier le token
           try:
-              r = requests.get(
-                  f'{API}/me', params={'client_id': CID}, headers=headers,
-                  timeout=45, proxies=PROXIES,
-              )
+              r = requests.get(f'{API}/me', params={'client_id': CID}, headers=headers, timeout=45, proxies=PROXIES)
           except requests.RequestException as e:
-              print(f"❌ Erreur réseau vers SoundCloud: {e}")
+              print(f"❌ Réseau SoundCloud: {e}")
               sys.exit(1)
-
           print(f'/me → {r.status_code}')
           if r.status_code != 200:
-              print(f"Réponse: {r.text[:300]}")
-              print('Token SoundCloud invalide ou expiré — régénère le token et mets à jour SC_OAUTH_TOKEN.')
+              print(r.text[:300])
               sys.exit(1)
           print(f"Compte: {r.json().get('username')}")
 
-          # Test SSH serveur
           code, ping = ssh('echo OK')
           if code != 0 or ping != 'OK':
-              print('❌ SSH vers le serveur a échoué — vérifie SERVER_HOST, SERVER_USER, SERVER_PASS et que ssh/sshd accepte le compte.')
+              print('❌ SSH serveur échoué')
               sys.exit(1)
 
-          # Lister les MP3 en queue sur le serveur
           _, files_raw = ssh(f'ls {QUEUE}/*.mp3 2>/dev/null || true')
           if not files_raw:
-              print('Aucun fichier en queue (dossier vide ou inexistant).')
+              print('Aucun fichier en queue.')
               sys.exit(0)
 
           remote_files = [f.strip() for f in files_raw.splitlines() if f.strip()]
           print(f'{len(remote_files)} fichier(s) en queue')
-
           count = 0
           blocked = False
-          for remote_path in remote_files[:5]:  # Max 5 par run
+          for remote_path in remote_files[:5]:
               filename = Path(remote_path).name
               stem = Path(filename).stem
               title = stem.replace('_432Hz','').replace('_432hz','').replace('_',' ').strip() + ' - 432Hz'
-
               local_file = TMP / filename
               print(f'\nTéléchargement: {filename}')
               if not scp_get(remote_path, local_file):
-                  print(f'Erreur SCP')
                   continue
-
               print(f'Upload: {title}')
               with open(local_file, 'rb') as f:
                   resp = requests.post(
@@ -170,25 +160,17 @@ jobs:
                       timeout=300,
                       proxies=PROXIES,
                   )
-
               print(f'Status: {resp.status_code} | {resp.text[:200]}')
-
               if resp.status_code in (200, 201):
-                  url = resp.json().get('permalink_url', '')
-                  print(f'✅ Publié: {url}')
+                  print(f'✅ Publié: {resp.json().get("permalink_url", "")}')
                   ssh(f'mkdir -p {DONE} && mv "{remote_path}" {DONE}/')
                   count += 1
                   time.sleep(5)
               elif resp.status_code == 403:
-                  print('❌ DataDome (403) — IP du runner GitHub (cloud) bloquée.')
-                  if not PROXIES:
-                      print('   → Gratuit : workflow « SoundCloud Upload (maison) » + runner self-hosted sur ton Mac.')
-                      print('   → Payant : secret SC_RESIDENTIAL_PROXY (proxy résidentiel).')
+                  print('❌ 403 DataDome — rare sur IP maison ; réessaie ou mets SC_RESIDENTIAL_PROXY.')
                   blocked = True
                   break
-
               local_file.unlink(missing_ok=True)
-
           print(f'\n✅ {count} track(s) publiés')
           if blocked:
               sys.exit(1)
