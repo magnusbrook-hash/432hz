@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Pas de setup-python : self-hosted macOS → /Users/runner interdit. PEP 668 : venv.
       - name: Python venv + deps
