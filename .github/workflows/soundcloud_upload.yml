@@ -20,7 +20,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests sshpass 2>/dev/null || pip install requests paramiko
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+          pip install requests
 
       - name: Download pending MP3s from server & upload to SoundCloud
         env:
@@ -31,10 +34,11 @@ jobs:
           SERVER_PASS: ${{ secrets.SERVER_PASS }}
         run: |
           python3 - << 'PYEOF'
-          import os, json, requests, subprocess, time
+          import os, requests, subprocess, time
           from pathlib import Path
 
-          TOKEN    = f"OAuth {os.environ['SC_TOKEN']}"
+          raw = os.environ['SC_TOKEN'].strip()
+          TOKEN = raw if raw.lower().startswith('oauth ') else f'OAuth {raw}'
           CID      = os.environ['SC_CLIENT_ID']
           HOST     = os.environ['SERVER_HOST']
           USER     = os.environ['SERVER_USER']
