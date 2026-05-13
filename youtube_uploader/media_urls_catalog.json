@@ -1,0 +1,61 @@
+{
+  "generated_at": "2026-05-13T15:18:20.941130+00:00",
+  "soundcloud_profile": "https://soundcloud.com/432hz-converter",
+  "manual_notes": "Renseigne les champs null après publication (lien Partager SoundCloud / watch YouTube). Relance export_media_urls_catalog.py après chaque upload pour fusionner avec published_videos.json.",
+  "manual_tracks": {
+    "kasst-vtopia-432hz": {
+      "aliases": [
+        "Kasst - Vtopia",
+        "KAS:ST - VTOPIA",
+        "Vtopia 432Hz"
+      ],
+      "youtube_source_official": "https://www.youtube.com/watch?v=HmfJqm9P7Ks",
+      "youtube_432hz_upload": null,
+      "soundcloud_432hz": null
+    }
+  },
+  "youtube_uploads_432hz": [
+    {
+      "tracker_key": "xxxtentacion - changes",
+      "title": "XXXTENTACION - changes - 432Hz #shorts",
+      "url": "https://www.youtube.com/watch?v=voxWSHKbj9E",
+      "video_id": "voxWSHKbj9E",
+      "published_date": "2025-12-28T19:07:40.143331"
+    },
+    {
+      "tracker_key": "xxxtentacion - look at me! (audio)",
+      "title": "XXXTENTACION - Look At Me! (Audio) - 432Hz #shorts",
+      "url": "https://www.youtube.com/watch?v=lN3cAGaW4Nk",
+      "video_id": "lN3cAGaW4Nk",
+      "published_date": "2025-12-28T19:08:46.560600"
+    },
+    {
+      "tracker_key": "xxxtentacion - moonlight (official music video)",
+      "title": "XXXTENTACION - MOONLIGHT (OFFICIAL MUSIC VIDEO) - 432Hz #shorts",
+      "url": "https://www.youtube.com/watch?v=i-6qW4AM3QE",
+      "video_id": "i-6qW4AM3QE",
+      "published_date": "2025-12-28T19:12:39.534960"
+    },
+    {
+      "tracker_key": "daño",
+      "title": "daño - 432Hz #shorts",
+      "url": "https://www.youtube.com/watch?v=SS7oX8LnvlM",
+      "video_id": "SS7oX8LnvlM",
+      "published_date": "2025-12-29T08:02:06.623445"
+    },
+    {
+      "tracker_key": "bckpckbyz",
+      "title": "bckpckbyz - 432Hz #shorts",
+      "url": "https://www.youtube.com/watch?v=AEUUJz7pebU",
+      "video_id": "AEUUJz7pebU",
+      "published_date": "2025-12-29T08:05:08.471941"
+    },
+    {
+      "tracker_key": "dua lipa - new rules (official music video)",
+      "title": "Dua Lipa - New Rules (Official Music Video) - 432Hz #shorts",
+      "url": "https://www.youtube.com/watch?v=pdfDGQ-kmsY",
+      "video_id": "pdfDGQ-kmsY",
+      "published_date": "2025-12-29T08:07:23.778113"
+    }
+  ]
+}

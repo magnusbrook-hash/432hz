@@ -1,0 +1,12 @@
+{
+  "soundcloud_profile": "https://soundcloud.com/432hz-converter",
+  "notes": "Renseigne les champs null après publication (lien Partager SoundCloud / watch YouTube). Relance export_media_urls_catalog.py après chaque upload pour fusionner avec published_videos.json.",
+  "tracks": {
+    "kasst-vtopia-432hz": {
+      "aliases": ["Kasst - Vtopia", "KAS:ST - VTOPIA", "Vtopia 432Hz"],
+      "youtube_source_official": "https://www.youtube.com/watch?v=HmfJqm9P7Ks",
+      "youtube_432hz_upload": null,
+      "soundcloud_432hz": null
+    }
+  }
+}
