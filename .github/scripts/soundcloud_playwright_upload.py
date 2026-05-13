@@ -27,6 +27,77 @@ def _default_profile() -> Path:
     return Path.home() / ".432hz" / "soundcloud-playwright-profile"
 
 
+def _count_file_inputs_in_context(ctx) -> int:
+    """ctx = page ou Frame."""
+    try:
+        return int(ctx.evaluate("() => document.querySelectorAll('input[type=file]').length") or 0)
+    except Exception:
+        return 0
+
+
+def _set_files_on_first_input(ctx, mp3: Path) -> bool:
+    loc = ctx.locator('input[type="file"]')
+    if loc.count() == 0:
+        return False
+    loc.first.set_input_files(str(mp3.resolve()))
+    return True
+
+
+def _try_upload_via_filechooser(page, mp3: Path) -> bool:
+    """Ouvre le sélecteur de fichiers comme un clic utilisateur (SPA / bouton)."""
+    rx_button = re.compile(
+        r"upload( a| your)? track|choose file|browse|select file|add.*track|"
+        r"t[ée]l[ée]vers|parcourt|choisis",
+        re.I,
+    )
+    candidates = [
+        page.get_by_role("button", name=rx_button),
+        page.get_by_role("link", name=rx_button),
+        page.locator('button:has-text("Upload")'),
+        page.locator('a:has-text("Upload")'),
+        page.locator('[data-testid*="upload"]'),
+        page.locator('[data-testid*="Upload"]'),
+        page.locator('label:has-text("Upload")'),
+    ]
+    for loc in candidates:
+        try:
+            if loc.count() == 0:
+                continue
+            el = loc.first
+            if not el.is_visible():
+                continue
+            with page.expect_file_chooser(timeout=20_000) as fc:
+                el.click()
+            fc.value.set_files(str(mp3.resolve()))
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _attach_mp3_to_upload_page(page, mp3: Path) -> bool:
+    """
+    Trouve un input file (éventuellement dans une iframe, après hydratation React)
+    ou déclenche un file chooser.
+    """
+    # Laisser le temps au bundle JS (upload 2024+)
+    page.wait_for_load_state("domcontentloaded")
+    for _ in range(45):
+        if _count_file_inputs_in_context(page) > 0:
+            return _set_files_on_first_input(page, mp3)
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            if _count_file_inputs_in_context(frame) > 0:
+                return _set_files_on_first_input(frame, mp3)
+        page.wait_for_timeout(1000)
+
+    if _try_upload_via_filechooser(page, mp3):
+        return True
+
+    return False
+
+
 def login_only(profile: Path, channel: str | None) -> int:
     from playwright.sync_api import sync_playwright
 
@@ -77,22 +148,39 @@ def upload_track(mp3: Path, title: str | None, profile: Path, channel: str | Non
         try:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.set_default_timeout(120_000)
-            page.goto("https://soundcloud.com/upload", wait_until="domcontentloaded")
-            time.sleep(2)
 
-            u = page.url
-            if "/sign-in" in u or "/login" in u or ("signin" in u and "soundcloud.com" in u):
+            urls_try = (
+                "https://soundcloud.com/upload",
+                "https://soundcloud.com/you/upload",
+            )
+            uploaded = False
+            for upload_url in urls_try:
+                page.goto(upload_url, wait_until="domcontentloaded")
+                u = page.url
+                if "/sign-in" in u or "/login" in u or ("signin" in u and "soundcloud.com" in u):
+                    print(
+                        "❌ Session expirée ou non connecté — refais --login-only avec le même --profile.",
+                        file=sys.stderr,
+                    )
+                    return 4
+                if _attach_mp3_to_upload_page(page, mp3):
+                    uploaded = True
+                    break
+                print(f"   (pas d’input sur {upload_url} — essai suivant…)", file=sys.stderr)
+
+            if not uploaded:
+                # Dernier recours : page « tracks » puis file chooser
+                page.goto("https://soundcloud.com/you/tracks", wait_until="domcontentloaded")
+                uploaded = _try_upload_via_filechooser(page, mp3) or _attach_mp3_to_upload_page(page, mp3)
+
+            if not uploaded:
                 print(
-                    "❌ Session expirée ou non connecté — refais --login-only avec le même --profile.",
+                    "❌ Aucun input[type=file] ni bouton d’upload exploitable.\n"
+                    f"   URL actuelle : {page.url}\n"
+                    "   Essaie : --headed pour voir la page, ou --channel chrome, ou refais --login-only.",
                     file=sys.stderr,
                 )
-                return 4
-
-            inputs = page.locator('input[type="file"]')
-            if inputs.count() == 0:
-                print("❌ Aucun input[type=file] sur /upload — la page a peut‑être changé.", file=sys.stderr)
                 return 5
-            inputs.first.set_input_files(str(mp3.resolve()))
             print(f"📤 Fichier envoyé au navigateur : {mp3.name}")
             time.sleep(3)
             if title:
