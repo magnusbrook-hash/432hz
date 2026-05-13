@@ -34,15 +34,24 @@ jobs:
           SERVER_PASS: ${{ secrets.SERVER_PASS }}
         run: |
           python3 - << 'PYEOF'
-          import os, requests, subprocess, time
+          import os, sys, requests, subprocess, time
           from pathlib import Path
 
-          raw = os.environ['SC_TOKEN'].strip()
-          TOKEN = raw if raw.lower().startswith('oauth ') else f'OAuth {raw}'
-          CID      = os.environ['SC_CLIENT_ID']
-          HOST     = os.environ['SERVER_HOST']
-          USER     = os.environ['SERVER_USER']
-          PASSWD   = os.environ['SERVER_PASS']
+          def need(name):
+              v = os.environ.get(name, "").strip()
+              if not v:
+                  print(f"❌ Secret manquant ou vide: {name}")
+                  print("→ GitHub → Settings → Secrets and variables → Actions")
+                  sys.exit(1)
+              return v
+
+          raw = need("SC_TOKEN")
+          CID = need("SC_CLIENT_ID")
+          HOST = need("SERVER_HOST")
+          USER = need("SERVER_USER")
+          PASSWD = need("SERVER_PASS")
+
+          TOKEN = raw if raw.lower().startswith("oauth ") else f"OAuth {raw}"
           QUEUE    = '/home/ubuntu/soundcloud_queue'
           DONE     = '/home/ubuntu/soundcloud_queue_done'
           API      = 'https://api-v2.soundcloud.com'
@@ -54,6 +63,8 @@ jobs:
                   ['sshpass', '-p', PASSWD, 'ssh', '-o', 'StrictHostKeyChecking=no',
                    f'{USER}@{HOST}', cmd],
                   capture_output=True, text=True, timeout=30)
+              if r.returncode != 0 and r.stderr.strip():
+                  print(f"   [ssh stderr] {r.stderr.strip()[:500]}")
               return r.returncode, r.stdout.strip()
 
           def scp_get(remote, local):
@@ -61,6 +72,8 @@ jobs:
                   ['sshpass', '-p', PASSWD, 'scp', '-o', 'StrictHostKeyChecking=no',
                    f'{USER}@{HOST}:{remote}', str(local)],
                   capture_output=True, text=True, timeout=120)
+              if r.returncode != 0:
+                  print(f"   [scp stderr] {r.stderr.strip()[:500]}")
               return r.returncode == 0
 
           headers = {
@@ -72,23 +85,36 @@ jobs:
           }
 
           # Vérifier le token
-          r = requests.get(f'{API}/me', params={'client_id': CID}, headers=headers, timeout=15)
+          try:
+              r = requests.get(f'{API}/me', params={'client_id': CID}, headers=headers, timeout=15)
+          except requests.RequestException as e:
+              print(f"❌ Erreur réseau vers SoundCloud: {e}")
+              sys.exit(1)
+
           print(f'/me → {r.status_code}')
           if r.status_code != 200:
-              print('Token invalide, arrêt.')
-              exit(1)
+              print(f"Réponse: {r.text[:300]}")
+              print('Token SoundCloud invalide ou expiré — régénère le token et mets à jour SC_OAUTH_TOKEN.')
+              sys.exit(1)
           print(f"Compte: {r.json().get('username')}")
 
+          # Test SSH serveur
+          code, ping = ssh('echo OK')
+          if code != 0 or ping != 'OK':
+              print('❌ SSH vers le serveur a échoué — vérifie SERVER_HOST, SERVER_USER, SERVER_PASS et que ssh/sshd accepte le compte.')
+              sys.exit(1)
+
           # Lister les MP3 en queue sur le serveur
-          _, files_raw = ssh(f'ls {QUEUE}/*.mp3 2>/dev/null')
+          _, files_raw = ssh(f'ls {QUEUE}/*.mp3 2>/dev/null || true')
           if not files_raw:
-              print('Aucun fichier en queue.')
-              exit(0)
+              print('Aucun fichier en queue (dossier vide ou inexistant).')
+              sys.exit(0)
 
           remote_files = [f.strip() for f in files_raw.splitlines() if f.strip()]
           print(f'{len(remote_files)} fichier(s) en queue')
 
           count = 0
+          blocked = False
           for remote_path in remote_files[:5]:  # Max 5 par run
               filename = Path(remote_path).name
               stem = Path(filename).stem
@@ -126,10 +152,13 @@ jobs:
                   count += 1
                   time.sleep(5)
               elif resp.status_code == 403:
-                  print('❌ DataDome bloque GitHub Actions IPs aussi — voir alternatives')
+                  print('❌ DataDome / anti-bot (403) — IP GitHub bloquée pour POST /tracks.')
+                  blocked = True
                   break
 
               local_file.unlink(missing_ok=True)
 
           print(f'\n✅ {count} track(s) publiés')
+          if blocked:
+              sys.exit(1)
           PYEOF
