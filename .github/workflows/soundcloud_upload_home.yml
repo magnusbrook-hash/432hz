@@ -18,16 +18,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Pas de setup-python : sur runner self-hosted macOS il vise /Users/runner (inexistant) → Permission denied.
-      - name: Python système + pip
+      # Pas de setup-python : self-hosted macOS → /Users/runner interdit. PEP 668 (Homebrew) : pas de pip global.
+      - name: Python venv + requests
         run: |
           set -e
           which python3
           python3 --version
-          python3 -m pip install --upgrade pip
-          python3 -m pip install requests
+          VENV="${GITHUB_WORKSPACE}/.venv_soundcloud"
+          python3 -m venv "$VENV"
+          "$VENV/bin/python" -m pip install --upgrade pip
+          "$VENV/bin/pip" install requests
 
-      - name: Install sshpass + requests
+      - name: Install sshpass
         run: |
           if command -v sshpass >/dev/null 2>&1; then
             echo "sshpass déjà présent"
@@ -48,7 +50,7 @@ jobs:
           SERVER_PASS: ${{ secrets.SERVER_PASS }}
           SC_RESIDENTIAL_PROXY: ${{ secrets.SC_RESIDENTIAL_PROXY }}
         run: |
-          python3 - << 'PYEOF'
+          "${GITHUB_WORKSPACE}/.venv_soundcloud/bin/python" - << 'PYEOF'
           import os, sys, requests, subprocess, time
           from pathlib import Path
           from urllib.parse import urlparse
