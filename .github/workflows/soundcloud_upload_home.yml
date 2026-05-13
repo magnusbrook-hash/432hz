@@ -18,18 +18,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      # Pas de setup-python : sur runner self-hosted macOS il vise /Users/runner (inexistant) → Permission denied.
+      - name: Python système + pip
+        run: |
+          set -e
+          which python3
+          python3 --version
+          python3 -m pip install --upgrade pip
+          python3 -m pip install requests
 
       - name: Install sshpass + requests
         run: |
-          pip install requests
           if command -v sshpass >/dev/null 2>&1; then
             echo "sshpass déjà présent"
           elif [ "${RUNNER_OS:-}" = "macOS" ]; then
-            brew install sshpass || brew install esolitos/ipa/sshpass/sshpass
+            brew install sshpass || brew install esolitos/ipa/sshpass/sshpass || true
           elif [ "${RUNNER_OS:-}" = "Linux" ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq sshpass
           else
