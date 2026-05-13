@@ -83,18 +83,18 @@ jobs:
               except ImportError as e:
                   import requests as rq
                   print(f"🔌 HTTP: requests — curl_cffi absent ({e})")
-                  return rq.Session()
+                  return rq.Session(), False
               last_err = None
               for impersonate in ("chrome131", "chrome124", "chrome120", "chrome110"):
                   try:
                       s = creq.Session(impersonate=impersonate)
                       print(f"🔌 HTTP: curl_cffi ({impersonate})")
-                      return s
+                      return s, True
                   except Exception as ex:
                       last_err = ex
               import requests as rq
               print(f"🔌 HTTP: requests — curl_cffi Session impossible ({last_err})")
-              return rq.Session()
+              return rq.Session(), False
 
           raw = need("SC_TOKEN", "SC_OAUTH_TOKEN")
           CID = need("SC_CLIENT_ID", "SC_CLIENT_ID")
@@ -136,7 +136,7 @@ jobs:
                   print(f"   [scp stderr] {r.stderr.strip()[:500]}")
               return r.returncode == 0
 
-          session = open_session()
+          session, use_cffi = open_session()
 
           def nav_headers():
               h = {
@@ -215,22 +215,51 @@ jobs:
               if not scp_get(remote_path, local_file):
                   continue
               print(f'Upload: {title}')
-              with open(local_file, 'rb') as f:
-                  resp = session.post(
-                      f'{API}/tracks',
-                      params={'client_id': CID},
-                      headers=api_headers(),
-                      files={'track[asset_data]': (filename, f, 'audio/mpeg')},
-                      data={
-                          'track[title]': title,
-                          'track[sharing]': 'public',
-                          'track[tag_list]': '"432hz" "healing frequency" "music"',
-                          'track[description]': 'Converti en 432Hz par https://432hz-converter.com/\n\n#432hz',
-                          'track[genre]': '432hz',
+              desc = 'Converti en 432Hz par https://432hz-converter.com/\n\n#432hz'
+              tags = '"432hz" "healing frequency" "music"'
+              if use_cffi:
+                  import curl_cffi
+                  mp = curl_cffi.CurlMime.from_list([
+                      {'name': 'track[title]', 'content_type': 'text/plain', 'data': title},
+                      {'name': 'track[sharing]', 'content_type': 'text/plain', 'data': 'public'},
+                      {'name': 'track[tag_list]', 'content_type': 'text/plain', 'data': tags},
+                      {'name': 'track[description]', 'content_type': 'text/plain', 'data': desc},
+                      {'name': 'track[genre]', 'content_type': 'text/plain', 'data': '432hz'},
+                      {
+                          'name': 'track[asset_data]',
+                          'content_type': 'audio/mpeg',
+                          'filename': filename,
+                          'local_path': str(local_file),
                       },
-                      timeout=300,
-                      proxies=PROXIES,
-                  )
+                  ])
+                  try:
+                      resp = session.post(
+                          f'{API}/tracks',
+                          params={'client_id': CID},
+                          headers=api_headers(),
+                          multipart=mp,
+                          timeout=300,
+                          proxies=PROXIES,
+                      )
+                  finally:
+                      mp.close()
+              else:
+                  with open(local_file, 'rb') as f:
+                      resp = session.post(
+                          f'{API}/tracks',
+                          params={'client_id': CID},
+                          headers=api_headers(),
+                          files={'track[asset_data]': (filename, f, 'audio/mpeg')},
+                          data={
+                              'track[title]': title,
+                              'track[sharing]': 'public',
+                              'track[tag_list]': tags,
+                              'track[description]': desc,
+                              'track[genre]': '432hz',
+                          },
+                          timeout=300,
+                          proxies=PROXIES,
+                      )
               print(f'Status: {resp.status_code} | {resp.text[:200]}')
               if resp.status_code in (200, 201):
                   print(f'✅ Publié: {resp.json().get("permalink_url", "")}')
